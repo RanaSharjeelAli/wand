@@ -1,0 +1,38 @@
+{
+    "company_info": {
+      "name": "Wand AI",
+      "founded": 2020,
+      "mission": "Integrate AI into enterprise workflows for a hybrid workforce model.",
+      "employees": 150,
+      "headquarters": "San Francisco, CA",
+      "departments": ["Engineering", "Sales", "Marketing", "Support", "Product"]
+    },
+  
+    "financials": [
+      {"quarter": "Q2 2025", "revenue": 120000, "profit": 30000, "expenses": 80000},
+      {"quarter": "Q3 2025", "revenue": 135000, "profit": 35000, "expenses": 90000},
+      {"quarter": "Q4 2025", "revenue": 150000, "profit": 40000, "expenses": 100000}
+    ],
+  
+    "customer_satisfaction": [
+      {"month": "October 2025", "surveyed": 200, "satisfied": 160, "neutral": 30, "dissatisfied": 10},
+      {"month": "November 2025", "surveyed": 220, "satisfied": 180, "neutral": 25, "dissatisfied": 15},
+      {"month": "December 2025", "surveyed": 210, "satisfied": 170, "neutral": 30, "dissatisfied": 10}
+    ],
+  
+    "sales_by_region": [
+      {"region": "North America", "sales": 50000},
+      {"region": "Europe", "sales": 40000},
+      {"region": "Asia", "sales": 30000},
+      {"region": "Australia", "sales": 15000}
+    ],
+  
+    "user_engagement": [
+      {"metric": "daily_active_users", "last_month_average": 1200},
+      {"metric": "weekly_active_users", "last_month_average": 4000},
+      {"metric": "monthly_active_users", "last_month_average": 9500},
+      {"metric": "average_session_time_minutes", "last_month_average": 25},
+      {"metric": "feature_usage", "details": {"chatbot": 60, "reports": 30, "analytics_dashboard": 10}}
+    ]
+  }
+  
