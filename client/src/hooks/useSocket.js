@@ -6,9 +6,15 @@ function useSocket(serverUrl) {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
+    // Get auth token from localStorage
+    const token = localStorage.getItem('authToken');
+    
     const newSocket = io(serverUrl, {
       transports: ['websocket'],
       upgrade: false,
+      auth: {
+        token: token || null
+      }
     });
 
     newSocket.on('connect', () => {

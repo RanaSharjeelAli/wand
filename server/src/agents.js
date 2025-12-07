@@ -4,13 +4,14 @@ const path = require('path');
 const { OllamaService } = require('./ollamaService');
 
 class TaskManager {
-  constructor(io, taskId) {
+  constructor(io, taskId, sqliteStorage = null) {
     this.io = io;
     this.taskId = taskId;
     this.agents = [];
     this.results = {};
     this.wandAiData = this.loadWandAiData();
     this.ollamaService = new OllamaService();
+    this.storage = sqliteStorage;
   }
 
   loadWandAiData() {
@@ -30,12 +31,43 @@ class TaskManager {
     }
   }
 
+  // Load and combine knowledge from wand_ai.json and uploaded documents
+  async loadKnowledgeBase(userId = 'default-user') {
+    const knowledge = {
+      structured: this.wandAiData,
+      documents: [],
+      combined: ''
+    };
+
+    // Load uploaded documents if storage is available
+    if (this.storage) {
+      try {
+        const userDocs = this.storage.getUserDocuments(userId);
+        knowledge.documents = userDocs;
+        
+        // Combine all document content for context
+        const docTexts = userDocs.map(doc => 
+          `[Document: ${doc.filename}]\n${doc.textContent}\n\n`
+        ).join('');
+        
+        knowledge.combined = docTexts;
+      } catch (error) {
+        console.error('[TaskManager] Error loading documents:', error);
+      }
+    }
+
+    return knowledge;
+  }
+
   async processTask(taskData) {
     try {
-      // Step 1: Analyze task and determine required agents
+      // Step 1: Load combined knowledge base
+      const knowledgeBase = await this.loadKnowledgeBase(taskData.userId || 'default-user');
+      
+      // Step 2: Analyze task and determine required agents
       const agents = this.determineAgents(taskData.request);
       
-      // Step 2: Initialize agents
+      // Step 3: Initialize agents
       this.agents = agents.map(agentType => ({
         id: uuidv4(),
         type: agentType,
@@ -51,10 +83,10 @@ class TaskManager {
         request: taskData.request
       });
 
-      // Step 3: Execute agents in sequence or parallel
-      await this.executeAgents(taskData.request);
+      // Step 4: Execute agents with knowledge base context
+      await this.executeAgents(taskData.request, knowledgeBase);
 
-      // Step 4: Aggregate results
+      // Step 5: Aggregate results
       const finalResult = this.aggregateResults();
 
       // Step 5: Send final result
@@ -63,11 +95,17 @@ class TaskManager {
         result: finalResult
       });
 
+      // Return the final result so it can be saved to database
+      return finalResult;
+
     } catch (error) {
       this.io.emit('task-error', {
         taskId: this.taskId,
         error: error.message
       });
+      
+      // Re-throw the error so the caller can handle it
+      throw error;
     }
   }
 
@@ -75,33 +113,64 @@ class TaskManager {
     const agents = [];
     const lowerRequest = request.toLowerCase();
 
+    // Check if user explicitly wants visualization
+    const wantsVisualization = lowerRequest.includes('chart') || 
+                               lowerRequest.includes('graph') || 
+                               lowerRequest.includes('visualize') ||
+                               lowerRequest.includes('show me') ||
+                               lowerRequest.includes('compare');
+
     // Business logic to determine which agents are needed
     if (lowerRequest.includes('summarize') || lowerRequest.includes('summary')) {
       agents.push('summarizer');
     }
     
-    if (lowerRequest.includes('chart') || lowerRequest.includes('graph') || lowerRequest.includes('visualize')) {
-      agents.push('data-analyst');
+    if (lowerRequest.includes('financial') || lowerRequest.includes('quarter') || lowerRequest.includes('trend')) {
+      agents.push('financial-analyst');
+      // Always add chart for financial and trend analysis
       agents.push('chart-generator');
     }
     
-    if (lowerRequest.includes('financial') || lowerRequest.includes('quarter') || lowerRequest.includes('trend')) {
-      agents.push('financial-analyst');
+    if (lowerRequest.includes('sales') || lowerRequest.includes('region')) {
+      agents.push('data-analyst');
+      // Always add chart for sales and regional data
+      agents.push('chart-generator');
+    }
+    
+    if (lowerRequest.includes('customer') || lowerRequest.includes('satisfaction')) {
+      agents.push('data-analyst');
+      // Always add chart for customer satisfaction data
+      agents.push('chart-generator');
+    }
+    
+    if (lowerRequest.includes('engagement') || lowerRequest.includes('user') || lowerRequest.includes('active')) {
+      agents.push('data-analyst');
+      // Always add chart for engagement metrics
+      agents.push('chart-generator');
     }
     
     if (lowerRequest.includes('data') || lowerRequest.includes('report')) {
       agents.push('data-collector');
+      // Add chart for reports and data analysis
+      if (wantsVisualization || lowerRequest.includes('report')) {
+        agents.push('chart-generator');
+      }
     }
 
     // Default agents if none matched
     if (agents.length === 0) {
-      agents.push('general-analyst', 'report-generator');
+      agents.push('general-analyst');
+      // Add chart for general queries if visualization requested
+      if (wantsVisualization) {
+        agents.push('chart-generator');
+      }
     }
 
-    return agents;
+    // Remove duplicates
+    return [...new Set(agents)];
   }
 
-  async executeAgents(request) {
+  async executeAgents(request, knowledgeBase) {
     for (const agent of this.agents) {
       // Update agent status to running
       agent.status = 'running';
@@ -111,7 +180,7 @@ class TaskManager {
       });
 
       // Simulate agent work with progress updates
-      await this.simulateAgentWork(agent, request);
+      await this.simulateAgentWork(agent, request, knowledgeBase);
 
       // Update agent status to completed
       agent.status = 'completed';
@@ -123,7 +192,7 @@ class TaskManager {
     }
   }
 
-  async simulateAgentWork(agent, request) {
+  async simulateAgentWork(agent, request, knowledgeBase) {
     const steps = 10;
     const stepDelay = 500; // 500ms per step
 
@@ -138,20 +207,22 @@ class TaskManager {
       await new Promise(resolve => setTimeout(resolve, stepDelay));
     }
 
-    // Generate result using Ollama and structured data
-    agent.result = await this.generateResultWithOllama(agent.type, request);
+    // Generate result using Ollama with combined knowledge base
+    agent.result = await this.generateResultWithOllama(agent.type, request, knowledgeBase);
     this.results[agent.type] = agent.result;
   }
 
-  async generateResultWithOllama(agentType, request) {
+  async generateResultWithOllama(agentType, request, knowledgeBase) {
     // First, get structured data based on query type
     const structuredData = this.getStructuredData(agentType, request);
     
-    // Then use Ollama to generate natural language responses
+    // Then use Ollama to generate natural language responses with BOTH knowledge sources
     try {
       const context = {
         wandAiData: this.wandAiData,
-        structuredData: structuredData
+        structuredData: structuredData,
+        documentKnowledge: knowledgeBase.combined || '',  // Include uploaded documents
+        availableDocuments: knowledgeBase.documents || [] // Document metadata
       };
       
       const ollamaResponse = await this.ollamaService.generateResponse(
@@ -320,9 +391,14 @@ class TaskManager {
         data: financialData.map(q => ({
           quarter: q.quarter.replace(' 2025', '').replace('Q', 'Q'), // Format: Q1, Q2, etc.
           revenue: q.revenue,
-          profit: q.profit
+          profit: q.profit,
+          expenses: q.expenses
         })),
-        insights: this.generateChartInsights(financialData)
+        xAxis: 'quarter',
+        yAxis: ['revenue', 'profit'],
+        title: 'Financial Trends Over Time',
+        insights: this.generateChartInsights(financialData),
+        recommended: true // Flag that this chart is recommended for the query
       },
       'report-generator': {
         sections: [
@@ -475,12 +551,17 @@ class TaskManager {
         confidence: 0.92
       },
       'chart-generator': {
-        chartType: 'bar',
+        chartType: 'pie',  // Changed to pie chart for regional comparison
+        title: 'Sales by Region',
         data: salesData.map(r => ({
-          region: r.region,
-          sales: r.sales
+          label: r.region,
+          value: r.sales,
+          percentage: ((r.sales / totalSales) * 100).toFixed(1)
         })),
-        insights: [`Total sales: $${totalSales.toLocaleString()}`, `Top region: ${topRegion.region || 'N/A'}`]
+        insights: [
+          `Total sales: $${totalSales.toLocaleString()}`, 
+          `Top region: ${topRegion.region || 'N/A'} (${((topRegion.sales / totalSales) * 100).toFixed(1)}%)`
+        ]
       }
     };
 
@@ -621,9 +702,22 @@ class TaskManager {
   generateChartInsights(data) {
     const maxRevenue = Math.max(...data.map(q => q.revenue));
     const maxProfit = Math.max(...data.map(q => q.profit));
+    const minRevenue = Math.min(...data.map(q => q.revenue));
+    const avgRevenue = data.reduce((sum, q) => sum + q.revenue, 0) / data.length;
+    const trend = maxRevenue > minRevenue ? 'upward' : 'downward';
+    
     const insights = [];
     insights.push(`Peak revenue: $${maxRevenue.toLocaleString()}`);
     insights.push(`Peak profit: $${maxProfit.toLocaleString()}`);
+    insights.push(`Average revenue: $${Math.round(avgRevenue).toLocaleString()}`);
+    insights.push(`Overall trend: ${trend}`);
+    
+    // Calculate growth rate between first and last period
+    if (data.length > 1) {
+      const growth = ((data[data.length - 1].revenue - data[0].revenue) / data[0].revenue * 100).toFixed(1);
+      insights.push(`Total growth: ${growth}%`);
+    }
+    
     return insights;
   }
 
@@ -642,19 +736,50 @@ class TaskManager {
   }
 
   aggregateResults() {
-    const summary = this.results['summarizer'];
-    const financial = this.results['financial-analyst'];
-    const chart = this.results['chart-generator'];
-    const report = this.results['report-generator'];
-
-    const baseSummary = summary?.summary || 'Analysis completed successfully';
-    const attribution = baseSummary.includes('LLM') || baseSummary.includes('Mock') ? '' : '\n\n*This response was generated by Mock JavaScript Agent*';
+    // Collect all agent results
+    const allResults = this.agents.map(a => a.result).filter(r => r);
+    
+    // Try to find the best summary from different agent types
+    let finalSummary = 'Analysis completed successfully.';
+    
+    // Priority order for summary sources
+    const summarizer = this.results['summarizer'];
+    const generalAnalyst = this.results['general-analyst'];
+    const financialAnalyst = this.results['financial-analyst'];
+    const dataCollector = this.results['data-collector'];
+    const dataAnalyst = this.results['data-analyst'];
+    const reportGenerator = this.results['report-generator'];
+    
+    // Get summary from available agents (in priority order)
+    if (summarizer?.summary) {
+      finalSummary = summarizer.summary;
+    } else if (generalAnalyst?.analysis) {
+      finalSummary = generalAnalyst.analysis;
+    } else if (financialAnalyst?.analysis) {
+      finalSummary = financialAnalyst.analysis;
+    } else if (dataCollector?.analysis) {
+      finalSummary = dataCollector.analysis;
+    } else if (dataAnalyst?.analysis) {
+      finalSummary = dataAnalyst.analysis;
+    } else if (reportGenerator?.ollamaAnalysis) {
+      finalSummary = reportGenerator.ollamaAnalysis;
+    } else {
+      // Fallback: combine any available text from results
+      const availableText = allResults
+        .map(r => r.summary || r.analysis || r.description || '')
+        .filter(t => t.length > 0)
+        .join('\n\n');
+      
+      if (availableText) {
+        finalSummary = availableText;
+      }
+    }
     
     return {
-      summary: baseSummary + attribution,
-      keyInsights: financial?.insights || [],
-      chartData: chart,
-      detailedReport: report,
+      summary: finalSummary,
+      keyInsights: financialAnalyst?.insights || [],
+      chartData: this.results['chart-generator'],
+      detailedReport: reportGenerator,
       agents: this.agents.map(a => ({
         id: a.id,
         type: a.type,

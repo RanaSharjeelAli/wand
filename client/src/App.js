@@ -1,218 +1,294 @@
 import React, { useState, useRef, useEffect } from 'react';
-import {
-  Typography,
-  Box,
-  Container,
-} from '@mui/material';
-import { motion } from 'framer-motion';
-import TaskForm from './components/TaskForm';
-import ChatMessage from './components/ChatMessage';
-import Results from './components/Results';
-import ExampleTasks from './components/ExampleTasks';
-import AgentProgress from './components/AgentProgress';
-import useSocket from './hooks/useSocket';
+import { useSelector, useDispatch } from 'react-redux';
+import { Box, Typography } from '@mui/material';
+import axios from 'axios';
+
+import ModernSidebar from './components/ModernSidebar';
+import ChatInterface from './components/ChatInterface';
+import KnowledgeBase from './components/KnowledgeBase';
+import Login from './components/Login';
+import Signup from './components/Signup';
+import useSocketConnection from './hooks/useSocketConnection';
+import { setMessages, clearAgents, clearResults, setResults } from './store/slices/taskSlice';
+import { SOCKET_EVENTS } from './config/constants';
+import { generateId } from './utils/helpers';
 
 function App() {
-  const [agents, setAgents] = useState([]);
-  const [results, setResults] = useState(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [messages, setMessages] = useState([]);
-  const messagesEndRef = useRef(null);
+  const dispatch = useDispatch();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [currentView, setCurrentView] = useState('chat'); // 'chat' or 'knowledge'
+  const [conversations, setConversations] = useState([]);
+  const [activeConversation, setActiveConversation] = useState(null);
+  const [currentChatId, setCurrentChatId] = useState(null);
+  
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [user, setUser] = useState(null);
+  const [authToken, setAuthToken] = useState(null);
+  const [authView, setAuthView] = useState('login'); // 'login' or 'signup'
+  const [authLoading, setAuthLoading] = useState(true);
 
-  const socket = useSocket('http://localhost:5001');
-
-  // Scroll to bottom when new messages arrive
+  // Check for existing token on mount
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, results]);
-
-  React.useEffect(() => {
-    if (!socket) return;
-
-    socket.on('task-started', (data) => {
-      setIsProcessing(true);
-      setResults(null);
-      setAgents(data.agents || []);
-    });
-
-    socket.on('agent-updated', (data) => {
-      setAgents(prev => 
-        prev.map(agent => 
-          agent.id === data.agent.id ? data.agent : agent
-        )
-      );
-    });
-
-    socket.on('agent-progress', (data) => {
-      setAgents(prev => 
-        prev.map(agent => 
-          agent.id === data.agentId 
-            ? { ...agent, progress: data.progress }
-            : agent
-        )
-      );
-    });
-
-    socket.on('task-completed', (data) => {
-      setResults(data.result);
-      setIsProcessing(false);
+    const checkAuth = async () => {
+      const token = localStorage.getItem('authToken');
+      const storedUser = localStorage.getItem('user');
       
-      // Add AI response to chat
-      const aiMessage = data.result.summary || 'Analysis completed successfully.';
-      setMessages(prev => [...prev, {
-        id: Date.now(),
-        text: aiMessage,
-        isUser: false,
-        timestamp: new Date().toISOString(),
-        result: data.result
-      }]);
-    });
-
-    socket.on('task-error', (data) => {
-      console.error('Task error:', data.error);
-      setIsProcessing(false);
-      setMessages(prev => [...prev, {
-        id: Date.now(),
-        text: `Error: ${data.error}`,
-        isUser: false,
-        timestamp: new Date().toISOString(),
-      }]);
-    });
-
-    return () => {
-      socket.off('task-started');
-      socket.off('agent-updated');
-      socket.off('agent-progress');
-      socket.off('task-completed');
-      socket.off('task-error');
+      if (token && storedUser) {
+        try {
+          // Verify token with backend
+          const response = await axios.get('http://localhost:5001/api/auth/verify', {
+            headers: {
+              Authorization: `Bearer ${token}`
+            }
+          });
+          
+          if (response.data.success) {
+            setAuthToken(token);
+            setUser(JSON.parse(storedUser));
+            setIsAuthenticated(true);
+          } else {
+            // Token invalid, clear storage
+            localStorage.removeItem('authToken');
+            localStorage.removeItem('user');
+          }
+        } catch (error) {
+          console.error('Token verification failed:', error);
+          localStorage.removeItem('authToken');
+          localStorage.removeItem('user');
+        }
+      }
+      setAuthLoading(false);
     };
-  }, [socket]);
+    
+    checkAuth();
+  }, []);
 
-  const handleTaskSubmit = (task) => {
-    setMessages(prev => [...prev, {
-      id: Date.now(),
-      text: task.request,
-      isUser: true,
-      timestamp: new Date().toISOString()
-    }]);
+  // Initialize socket connection only when authenticated
+  useSocketConnection();
 
-    if (socket) {
-      socket.emit('submit-task', task);
+  // Get state from Redux
+  const { messages, socket } = useSelector((state) => state.task);
+
+  // Fetch conversations only when authenticated
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchConversations();
+    }
+  }, [isAuthenticated]);
+
+  const fetchConversations = async () => {
+    try {
+      const token = localStorage.getItem('authToken');
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+      
+      const response = await fetch('http://localhost:5001/api/chats?limit=20', {
+        headers
+      });
+      const data = await response.json();
+      if (data.chats) {
+        setConversations(data.chats);
+      }
+    } catch (error) {
+      console.error('Error fetching conversations:', error);
     }
   };
 
-  const hasMessages = messages.length > 0;
+  // Socket event handlers
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleChatCreated = (data) => {
+      console.log('[App] Chat created:', data);
+      setCurrentChatId(data.chatId);
+      fetchConversations();
+    };
+
+    const handleChatUpdated = (data) => {
+      console.log('[App] Chat updated:', data);
+      setConversations(prev => {
+        const chat = prev.find(c => c._id === data.chatId);
+        if (chat) {
+          return [
+            { ...chat, updatedAt: new Date().toISOString() },
+            ...prev.filter(c => c._id !== data.chatId)
+          ];
+        }
+        return prev;
+      });
+    };
+
+    socket.on('chat-created', handleChatCreated);
+    socket.on('chat-updated', handleChatUpdated);
+
+    return () => {
+      socket.off('chat-created', handleChatCreated);
+      socket.off('chat-updated', handleChatUpdated);
+    };
+  }, [socket]);
+
+  const handleNewChat = () => {
+    dispatch(setMessages([]));
+    dispatch(clearAgents());
+    dispatch(clearResults());
+    setActiveConversation(null);
+    setCurrentChatId(null);
+  };
+
+  const handleSelectConversation = async (id) => {
+    setActiveConversation(id);
+    setCurrentChatId(id);
+    setCurrentView('chat'); // Switch to chat view when selecting a conversation
+    
+    dispatch(clearAgents());
+    dispatch(clearResults());
+    
+    try {
+      const token = localStorage.getItem('authToken');
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+      
+      const response = await fetch(`http://localhost:5001/api/chats/${id}`, {
+        headers
+      });
+      const chat = await response.json();
+      
+      if (chat && chat.messages) {
+        const formattedMessages = chat.messages.map(msg => ({
+          id: msg.id,
+          text: msg.text,
+          isUser: msg.isUser,
+          timestamp: msg.timestamp,
+          result: msg.results
+        }));
+        
+        dispatch(setMessages(formattedMessages));
+        
+        const lastAiMessage = [...chat.messages].reverse().find(msg => !msg.isUser && msg.results);
+        if (lastAiMessage && lastAiMessage.results) {
+          dispatch(setResults(lastAiMessage.results));
+        }
+      }
+    } catch (error) {
+      console.error('Error loading conversation:', error);
+    }
+  };
+
+  const handleDeleteConversation = async (id) => {
+    try {
+      const token = localStorage.getItem('authToken');
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+      
+      const response = await fetch(`http://localhost:5001/api/chats/${id}`, {
+        method: 'DELETE',
+        headers
+      });
+      
+      if (response.ok) {
+        if (activeConversation === id) {
+          handleNewChat();
+        }
+        await fetchConversations();
+      }
+    } catch (error) {
+      console.error('Error deleting conversation:', error);
+    }
+  };
+
+  const handleViewChange = (view) => {
+    setCurrentView(view);
+  };
+
+  const handleLoginSuccess = (userData, token) => {
+    setUser(userData);
+    setAuthToken(token);
+    setIsAuthenticated(true);
+  };
+
+  const handleSignupSuccess = (userData, token) => {
+    setUser(userData);
+    setAuthToken(token);
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('user');
+    setUser(null);
+    setAuthToken(null);
+    setIsAuthenticated(false);
+    dispatch(setMessages([]));
+    dispatch(clearAgents());
+    dispatch(clearResults());
+    setConversations([]);
+    setActiveConversation(null);
+    setCurrentChatId(null);
+  };
+
+  // Show loading while checking auth
+  if (authLoading) {
+    return (
+      <Box sx={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        height: '100vh',
+        background: 'linear-gradient(180deg, #5925DC 0%, #7B4FE8 100%)'
+      }}>
+        <Box sx={{ textAlign: 'center', color: '#FCFCFC' }}>
+          <Typography variant="h3" sx={{ fontWeight: 700, mb: 2 }}>Wand AI</Typography>
+          <Typography variant="body1">Loading...</Typography>
+        </Box>
+      </Box>
+    );
+  }
+
+  // Show auth pages if not authenticated
+  if (!isAuthenticated) {
+    if (authView === 'signup') {
+      return (
+        <Signup 
+          onSignupSuccess={handleSignupSuccess}
+          onSwitchToLogin={() => setAuthView('login')}
+        />
+      );
+    }
+    return (
+      <Login 
+        onLoginSuccess={handleLoginSuccess}
+        onSwitchToSignup={() => setAuthView('signup')}
+      />
+    );
+  }
 
   return (
-    <Box sx={{ 
-      minHeight: '100vh', 
-      width: '100%',
-      position: 'relative',
-      display: 'flex',
-      flexDirection: 'column',
-      paddingBottom: '140px', // Space for floating input
-      overflow: 'hidden',
-    }}>
-      {/* Header */}
-      <Box sx={{ 
-        bgcolor: 'rgba(255, 255, 255, 0.8)',
-        backdropFilter: 'blur(10px)',
-        borderBottom: '1px solid',
-        borderColor: 'rgba(0, 0, 0, 0.08)',
-        py: 2,
-        px: 3,
-        zIndex: 100,
-        position: 'sticky',
-        top: 0,
-      }}>
-        <Typography 
-          variant="h5" 
-          sx={{ 
-            color: 'text.primary',
-            fontWeight: 600,
-          }}
-        >
-          🤖 Wand AI Multi-Agent Task Solver
-        </Typography>
-      </Box>
+    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', background: '#F1F5F9' }}>
+      {/* Sidebar with Navigation */}
+      <ModernSidebar
+        isOpen={sidebarOpen}
+        onToggle={() => setSidebarOpen(!sidebarOpen)}
+        conversations={conversations}
+        onNewChat={handleNewChat}
+        onSelectConversation={handleSelectConversation}
+        onDeleteConversation={handleDeleteConversation}
+        activeConversation={activeConversation}
+        currentView={currentView}
+        onViewChange={handleViewChange}
+        user={user}
+        onLogout={handleLogout}
+      />
 
-      {/* Chat Area with Gradient Background */}
-      <Box sx={{
-        flex: 1,
-        position: 'relative',
-        overflowY: 'auto',
-        overflowX: 'hidden',
-        background: 'radial-gradient(circle 800px at top left, rgba(33, 150, 243, 0.12) 0%, rgba(33, 150, 243, 0.06) 25%, rgba(33, 150, 243, 0.02) 50%, rgba(255, 255, 255, 0) 70%)',
-        '&::-webkit-scrollbar': {
-          width: '8px',
-        },
-        '&::-webkit-scrollbar-track': {
-          background: 'transparent',
-        },
-        '&::-webkit-scrollbar-thumb': {
-          background: 'rgba(33, 150, 243, 0.2)',
-          borderRadius: '4px',
-          '&:hover': {
-            background: 'rgba(33, 150, 243, 0.3)',
-          },
-        },
-      }}>
-        <Container maxWidth="md" sx={{ py: 3, px: 2 }}>
-          {!hasMessages ? (
-            /* Initial State - Example Tasks in Center */
-            <Box sx={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              justifyContent: 'center',
-              minHeight: 'calc(100vh - 300px)',
-            }}>
-              <ExampleTasks onTaskSelect={handleTaskSubmit} />
-            </Box>
-          ) : (
-            /* Chat Messages */
-            <Box>
-              {messages.map((message) => (
-                <React.Fragment key={message.id}>
-                  <ChatMessage
-                    message={message.text}
-                    isUser={message.isUser}
-                    timestamp={message.timestamp}
-                  />
-                  {/* Show Results component after AI message if available */}
-                  {!message.isUser && message.result && (
-                    <Box sx={{ mb: 3, mt: -2 }}>
-                      <Results results={message.result} />
-                    </Box>
-                  )}
-                  {isProcessing && (
-                    <Box sx={{ mt: 2, mb: 2 }}>
-                      <AgentProgress agents={agents} isProcessing={isProcessing} />
-                    </Box>
-                  )}
-                </React.Fragment>
-              ))}
-              <div ref={messagesEndRef} />
-            </Box>
-          )}
-        </Container>
-      </Box>
-
-      {/* Floating Input Field at Bottom */}
-      <Box sx={{
-        position: 'fixed',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        borderColor: 'rgba(0, 0, 0, 0.08)',
-        p: 2,
-        zIndex: 1000,
-      }}>
-        <TaskForm 
-          onSubmit={handleTaskSubmit} 
-          disabled={isProcessing}
-          floating={true}
-showExamplePills={true}
-        />
+      {/* Main Content Area */}
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {currentView === 'chat' ? (
+          <ChatInterface
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+            currentChatId={currentChatId}
+            onNewChat={handleNewChat}
+          />
+        ) : (
+          <KnowledgeBase />
+        )}
       </Box>
     </Box>
   );
